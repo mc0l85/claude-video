@@ -18,7 +18,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from download import download, is_url  # noqa: E402
 from frames import MAX_FPS, auto_fps, auto_fps_focus, extract, format_time, get_metadata, parse_time  # noqa: E402
 from transcribe import filter_range, format_transcript, parse_vtt  # noqa: E402
-from whisper import load_api_key, transcribe_video  # noqa: E402
+from whisper import load_api_key, transcribe_video, transcribe_with_fallback  # noqa: E402
 
 
 def main() -> int:
@@ -117,29 +117,35 @@ def main() -> int:
             print(f"[watch] subtitle parse failed: {exc}", file=sys.stderr)
 
     if not transcript_segments and not args.no_whisper:
-        backend, api_key = load_api_key(args.whisper)
-        if backend and api_key:
-            try:
+        try:
+            if args.whisper:
+                # Explicit backend override — single-shot, no chain.
+                backend, api_key = load_api_key(args.whisper)
+                if not (backend and api_key):
+                    raise SystemExit(
+                        f"--whisper {args.whisper} set but matching API key missing"
+                    )
                 all_segments, used_backend = transcribe_video(
                     video_path,
                     work / "audio.mp3",
                     backend=backend,
                     api_key=api_key,
                 )
-                transcript_segments = filter_range(all_segments, start_sec, end_sec) if focused else all_segments
-                transcript_text = format_transcript(transcript_segments)
-                transcript_source = f"whisper ({used_backend})"
-            except SystemExit as exc:
-                print(f"[watch] whisper fallback failed: {exc}", file=sys.stderr)
-        else:
-            hint = (
-                f"--whisper {args.whisper} was set but the matching API key is missing"
-                if args.whisper else
-                "no subtitles and no Whisper API key found"
-            )
+            else:
+                # Auto: Groq → local faster-whisper on P40 (newtube fork default).
+                all_segments, used_backend = transcribe_with_fallback(
+                    video_path,
+                    work / "audio.mp3",
+                    chain=("groq", "local"),
+                )
+            transcript_segments = filter_range(all_segments, start_sec, end_sec) if focused else all_segments
+            transcript_text = format_transcript(transcript_segments)
+            transcript_source = f"whisper ({used_backend})"
+        except SystemExit as exc:
             setup_py = SCRIPT_DIR / "setup.py"
             print(
-                f"[watch] {hint} — run `python3 {setup_py}` to enable the Whisper fallback",
+                f"[watch] whisper fallback failed: {exc} — "
+                f"run `python3 {setup_py}` to (re)configure",
                 file=sys.stderr,
             )
 

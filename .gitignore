@@ -14,3 +14,11 @@ htmlcov/
 
 # local Claude Code settings
 .claude/settings.local.json
+
+# newtube fork — runtime files created by the queue worker on Tesla
+.env
+queue_worker.lock
+queue_worker.circuit_breaker
+queue_worker.notify_ratelimit
+/logs/
+/tmp/

@@ -304,6 +304,62 @@ def transcribe_video(
     return segments, backend
 
 
+def transcribe_with_fallback(
+    video_path: str,
+    audio_out: Path,
+    chain: tuple[str, ...] = ("groq", "local"),
+) -> tuple[list[dict], str]:
+    """Try each backend in chain order. Returns (segments, backend_used).
+
+    Newtube's preferred chain: Groq (free tier, fast) → local faster-whisper on the P40.
+    Audio is extracted once; later backends reuse the file from the failed attempt.
+    """
+    last_error: Exception | None = None
+
+    for backend in chain:
+        try:
+            if backend == "groq":
+                _, key = load_api_key("groq")
+                if not key or key == "PLACEHOLDER_REPLACE_ME":
+                    print("[watch] GROQ_API_KEY missing/placeholder — skipping", file=sys.stderr)
+                    continue
+                return transcribe_video(video_path, audio_out, backend="groq", api_key=key)
+
+            if backend == "openai":
+                _, key = load_api_key("openai")
+                if not key:
+                    continue
+                return transcribe_video(video_path, audio_out, backend="openai", api_key=key)
+
+            if backend == "local":
+                # Reuse audio from a prior failed remote attempt; else extract it.
+                audio_path = (
+                    audio_out
+                    if audio_out.exists() and audio_out.stat().st_size > 0
+                    else extract_audio(video_path, audio_out)
+                )
+                from local_whisper import transcribe as local_transcribe  # noqa: E402
+                segments = local_transcribe(audio_path)
+                if not segments:
+                    raise SystemExit("local whisper returned no segments")
+                return segments, "local"
+
+            raise SystemExit(f"Unknown whisper backend in chain: {backend}")
+
+        except SystemExit as exc:
+            last_error = exc
+            print(f"[watch] backend {backend} failed: {exc} — trying next in chain", file=sys.stderr)
+            continue
+        except Exception as exc:
+            last_error = exc
+            print(f"[watch] backend {backend} unexpected error: {exc!r}", file=sys.stderr)
+            continue
+
+    raise SystemExit(
+        f"All transcription backends failed (chain: {chain}). Last error: {last_error}"
+    )
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("usage: whisper.py <video-path> [<audio-out.mp3>] [--backend groq|openai]", file=sys.stderr)
