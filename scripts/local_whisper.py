@@ -37,21 +37,30 @@ def _get_model():
 
     model_name = os.environ.get("LOCAL_WHISPER_MODEL", "large-v3")
 
+    # Compute-type chain ordered by what actually works per device family.
+    # Pascal (P40, P100, etc.): float16 is "supported" but flagged as inefficient by
+    # faster-whisper, which refuses to load it. int8_float16 is the right pick.
+    # Turing+ (T4, RTX 20xx+): float16 works directly. CPU is the last resort.
     last_exc: Exception | None = None
-    for device, compute_type in (("cuda", "float16"), ("cpu", "int8")):
+    chain = (
+        ("cuda", "int8_float16"),  # Pascal-friendly, also fine on Turing+
+        ("cuda", "float16"),        # modern-GPU fast path if int8_float16 isn't available
+        ("cpu", "int8"),            # last resort
+    )
+    for device, compute_type in chain:
         try:
-            logger.info(f"loading faster-whisper {model_name} on {device}…")
+            logger.info(f"loading faster-whisper {model_name} on {device}/{compute_type}…")
             t0 = time.time()
             _MODEL = WhisperModel(model_name, device=device, compute_type=compute_type)
             _DEVICE_USED = device
-            logger.info(f"loaded in {time.time() - t0:.1f}s on {device}")
+            logger.info(f"loaded in {time.time() - t0:.1f}s on {device}/{compute_type}")
             return _MODEL, device
         except (RuntimeError, OSError, ValueError) as exc:
             last_exc = exc
-            logger.warning(f"faster-whisper init failed on {device}: {exc}")
+            logger.warning(f"faster-whisper init failed on {device}/{compute_type}: {exc}")
             continue
 
-    raise SystemExit(f"faster-whisper failed on cuda and cpu: {last_exc}")
+    raise SystemExit(f"faster-whisper failed on every device/compute_type: {last_exc}")
 
 
 def transcribe(audio_path: Path, language: str | None = None) -> list[dict]:
