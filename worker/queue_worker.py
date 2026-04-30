@@ -377,7 +377,13 @@ def strip_frames_section(report: str) -> str:
 
 
 def call_claude(prompt: str) -> str:
-    """Run claude --print and return stdout."""
+    """Run claude --print --output-format json and return the result text.
+
+    Parsing the JSON envelope (instead of relying on stderr) surfaces the real
+    error subtype (error_max_turns, error_during_execution, rate_limit, etc.)
+    when claude exits non-zero. Without this, claude often exits silently with
+    empty stderr and the worker has nothing to log.
+    """
     cmd = [
         CLAUDE_CLI_PATH,
         "--print",
@@ -386,6 +392,7 @@ def call_claude(prompt: str) -> str:
         "--append-system-prompt", CLAUDE_SYSTEM_PROMPT,
         "--max-budget-usd", str(CLAUDE_MAX_BUDGET_USD),
         "--no-session-persistence",
+        "--output-format", "json",
         prompt,
     ]
     logger.info(
@@ -398,9 +405,35 @@ def call_claude(prompt: str) -> str:
         text=True,
         timeout=CLAUDE_TIMEOUT,
     )
-    if result.returncode != 0:
-        raise RuntimeError(f"claude exit {result.returncode}: {result.stderr.strip()[:500]}")
-    return result.stdout
+
+    try:
+        payload = json.loads(result.stdout) if result.stdout.strip() else {}
+    except json.JSONDecodeError:
+        raise RuntimeError(
+            f"claude returned non-JSON (exit {result.returncode}): "
+            f"stdout[:300]={result.stdout[:300]!r} stderr[:300]={result.stderr.strip()[:300]!r}"
+        )
+
+    is_error = payload.get("is_error") or payload.get("subtype") in (
+        "error_max_turns",
+        "error_during_execution",
+    )
+    if is_error or result.returncode != 0:
+        raise RuntimeError(
+            f"claude error (exit={result.returncode}, "
+            f"subtype={payload.get('subtype')!r}, "
+            f"duration_ms={payload.get('duration_ms')}, "
+            f"num_turns={payload.get('num_turns')}, "
+            f"cost_usd={payload.get('total_cost_usd')}): "
+            f"result={(payload.get('result') or payload.get('error') or result.stderr.strip())[:500]!r}"
+        )
+
+    logger.info(
+        f"claude ok (turns={payload.get('num_turns')}, "
+        f"cost=${payload.get('total_cost_usd', 0):.3f}, "
+        f"duration_ms={payload.get('duration_ms')})"
+    )
+    return payload.get("result", "")
 
 
 FRONTMATTER_RE = re.compile(r"^---\n(.+?)\n---\n", re.DOTALL)
