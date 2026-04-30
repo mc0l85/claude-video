@@ -43,8 +43,9 @@ def _get_model():
     # Turing+ (T4, RTX 20xx+): float16 works directly. CPU is the last resort.
     last_exc: Exception | None = None
     chain = (
-        ("cuda", "int8_float16"),  # Pascal-friendly, also fine on Turing+
-        ("cuda", "float16"),        # modern-GPU fast path if int8_float16 isn't available
+        ("cuda", "int8_float16"),  # Turing+ optimal
+        ("cuda", "float16"),        # Turing+ alternative
+        ("cuda", "int8"),           # Pascal P40 fast path (refused int8_float16/float16)
         ("cpu", "int8"),            # last resort
     )
     for device, compute_type in chain:
