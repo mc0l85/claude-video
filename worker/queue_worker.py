@@ -468,7 +468,7 @@ def process_video(item: dict, work_root: Path) -> dict:
         prompt_input = strip_frames_section(report) if item["audio_only"] else report
 
         try:
-            claude_output = call_claude(PROMPT_TEMPLATE.format(watch_report=prompt_input))
+            claude_output = call_claude(PROMPT_TEMPLATE.replace("{watch_report}", prompt_input))
         except subprocess.TimeoutExpired:
             return {"status": "fail", "kind": "systemic", "message": "claude timeout"}
         except RuntimeError as exc:
