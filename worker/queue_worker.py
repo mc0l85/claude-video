@@ -438,6 +438,35 @@ def call_claude(prompt: str) -> str:
 
 FRONTMATTER_RE = re.compile(r"^---\n(.+?)\n---\n", re.DOTALL)
 FM_TITLE_RE = re.compile(r'^title:\s*"?([^"\n]+)"?\s*$', re.MULTILINE)
+TRANSCRIPT_SOURCE_REPORT_RE = re.compile(r"_Source:\s*([^.]+)\.")
+
+TRANSCRIPT_SOURCE_TAG_MAP = {
+    "captions": "Caption",
+    "whisper (groq)": "Groq",
+    "whisper (local)": "Local",
+}
+
+
+def map_transcript_source(raw: str) -> str:
+    return TRANSCRIPT_SOURCE_TAG_MAP.get((raw or "").strip().lower(), "Unknown")
+
+
+def inject_transcript_source_into_frontmatter(note: str, source_value: str) -> str:
+    """Add `transcript_source: <value>` to the markdown note's YAML frontmatter."""
+    fm_match = re.match(r"^(---\n)(.*?)(\n---\n)", note, re.DOTALL)
+    if not fm_match:
+        return note
+    fm_body = fm_match.group(2)
+    if re.search(r"^transcript_source:", fm_body, flags=re.MULTILINE):
+        new_fm_body = re.sub(
+            r"^transcript_source:.*$",
+            f"transcript_source: {source_value}",
+            fm_body,
+            flags=re.MULTILINE,
+        )
+    else:
+        new_fm_body = fm_body.rstrip() + f"\ntranscript_source: {source_value}"
+    return fm_match.group(1) + new_fm_body + fm_match.group(3) + note[fm_match.end():]
 
 
 def extract_title(claude_output: str, fallback: str) -> str:
@@ -515,6 +544,13 @@ def process_video(item: dict, work_root: Path) -> dict:
             }
 
         final_note = append_transcript_block(claude_output, transcript_text)
+
+        source_match = TRANSCRIPT_SOURCE_REPORT_RE.search(report)
+        if source_match:
+            final_note = inject_transcript_source_into_frontmatter(
+                final_note, map_transcript_source(source_match.group(1).strip())
+            )
+
         title = extract_title(claude_output, fallback=video_id)
 
         try:
