@@ -47,6 +47,25 @@ CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
 CLAUDE_MAX_BUDGET_USD = float(os.environ.get("CLAUDE_MAX_BUDGET_USD", "2.0"))
 CLAUDE_TIMEOUT = int(os.environ.get("CLAUDE_TIMEOUT", str(15 * 60)))  # 15 min
 
+# Long-video chunked extraction (Change 2 — yousummary parity).
+# When transcript exceeds threshold, pre-process via Haiku into structured
+# Topics/Key Points/Examples/Quotes per chunk, swap the watch_report transcript
+# for that intermediate, then run final synthesis. Set NEWTUBE_LONG_THRESHOLD=0
+# to disable.
+LONG_VIDEO_CHAR_THRESHOLD = int(os.environ.get("NEWTUBE_LONG_THRESHOLD", "12000"))
+CHUNK_TARGET_CHARS = int(os.environ.get("NEWTUBE_CHUNK_CHARS", "5000"))
+CHUNK_MODEL = os.environ.get("NEWTUBE_CHUNK_MODEL", "claude-haiku-4-5")
+CHUNK_TIMEOUT = int(os.environ.get("NEWTUBE_CHUNK_TIMEOUT", "180"))
+
+# Fabric extract_wisdom enrichment (Change 3 — production-side richer notes).
+# Splices a SUMMARY/IDEAS/INSIGHTS/QUOTES/HABITS/FACTS/REFERENCES block between
+# the model's body and the appended raw transcript. Cadence-fixed prompt lives
+# alongside this file. Set NEWTUBE_WISDOM=0 to disable.
+WISDOM_ENABLED = os.environ.get("NEWTUBE_WISDOM", "1") == "1"
+WISDOM_TIMEOUT = int(os.environ.get("NEWTUBE_WISDOM_TIMEOUT", "300"))
+WISDOM_MODEL = os.environ.get("NEWTUBE_WISDOM_MODEL", "claude-haiku-4-5")
+WISDOM_SYSTEM_PROMPT_PATH = WORKER_DIR / "extract_wisdom_system.md"
+
 DOWNLOAD_TIMEOUT = int(os.environ.get("DOWNLOAD_TIMEOUT", str(20 * 60)))
 HTTP_REQUEST_TIMEOUT = int(os.environ.get("HTTP_REQUEST_TIMEOUT", "30"))
 LOCK_FILE_AGE_LIMIT = int(os.environ.get("LOCK_FILE_AGE_LIMIT", str(6 * 3600)))
@@ -287,37 +306,55 @@ def fetch_queue() -> list[dict]:
 # --- Per-URL pipeline ---
 PROMPT_TEMPLATE = """Create a complete Obsidian Markdown note from this video.
 
-You will receive a watch.py report containing video metadata, frame paths, and a timestamped transcript. **Use the Read tool to view each frame at the listed path** so visual context (slides, demos, what's on-screen) makes it into the note. Then write the note grounded in BOTH frames and transcript.
+You will receive a watch.py report containing video metadata, frame paths, and a timestamped transcript. **Use the Read tool to view each frame at the listed path** so visual context (slides, demos, what's on-screen) informs the note. Then write the note grounded in BOTH frames and transcript.
 
 CRITICAL OUTPUT RULES:
 - First three characters MUST be: ---
 - NO preamble, NO commentary — output the raw markdown only.
-- Frontmatter (in this exact order):
-    title: clear descriptive title
-    created: ISO date from upload_date if available, else today
-    tags: 4-6 lowercase-with-hyphens
-    aliases: 2-3 lowercase-with-hyphens
-    description: one-sentence summary
-    channel: from metadata
-    source: original URL
+- Frontmatter (in this exact order; tags and aliases as MULTI-LINE YAML, not inline lists):
+    title: "human-readable title with normal word spacing"
+    created: ISO 8601 with time (YYYY-MM-DDTHH:MM:SSZ) from upload_date if available, else today at T00:00:00Z
+    tags:
+      - lowercase-with-hyphens
+      - (4-6 total)
+    aliases:
+      - lowercase-with-hyphens
+      - (2-3 total)
+    description: "one complete sentence with normal word spacing"
+    channel: "from metadata"
+    source: "original URL"
 - Use double quotes around title, description, channel, source for valid YAML.
+- HYPHENATION IS ONLY FOR `tags` AND `aliases` ENTRIES. NEVER replace spaces with hyphens inside `title` or `description`. Wrong: `title: "Five-iPhone-AI-Habits"`. Right: `title: "Five iPhone AI Habits"`.
 
-After frontmatter and a blank line:
+After frontmatter and a blank line, extract the YouTube video ID from the source URL (the `v=` parameter, or the last path segment of a `youtu.be/...` short URL), then output the thumbnail line:
 
-![]({thumbnail_or_blank})
+![](https://i.ytimg.com/vi/VIDEO_ID/maxresdefault.jpg)
 
-## {title}
+## TITLE
 
-###### Channel: [{channel}](channel link if available)
-###### Source: {url}
-###### Duration: {duration}
+###### Channel: [CHANNEL](channel @handle URL if available, e.g. https://www.youtube.com/@handle)
+###### Source: SOURCE_URL
+###### Duration: DURATION
 
 ---
 
 ## Key Takeaways:
-- 3-5 specific, actionable insights drawn from BOTH the frames and the transcript.
+- 3-5 specific, concrete findings drawn from BOTH the frames and the transcript.
+- Each takeaway must state a specific fact, decision, or measurable claim — NOT generic advice.
+- Avoid abstractions ("choose carefully", "be selective", "stay focused") unless followed immediately by a concrete instance.
+- Make each takeaway distinct and self-contained.
 
-Then main content sections with ## headers, varying formats between sections (callouts `> [!tip]`, tables, block quotes, lists). Available callouts: !tip !info !warning !example !quote !summary !important !abstract !question !danger !success !failure !bug. Tables need a blank line before. Avoid generic [[wikilinks]] — pick 5-10 specific concept phrases (Title Case, 1-4 words) for a Related Links line at the end:
+EXCLUDE the following from the entire note (takeaways AND body):
+- Channel self-promotion: subscribe/like reminders, "follow me on X", merch shoutouts, Patreon/Discord asks.
+- Sponsorship reads, UNLESS the sponsor's product is the actual subject of that segment.
+- Interaction prompts: "comment below", "let me know what you think", "ring the bell".
+- Generic intro/outro filler: "In today's video…", "Thanks for watching", "See you next time".
+
+Then 3-6 main content sections with ## headers, varying formats between adjacent sections (callouts `> [!tip]`, tables, block quotes, lists). Available callouts: !tip !info !warning !example !quote !summary !important !abstract !question !danger !success !failure !bug. Tables need a blank line before.
+
+FRAME INTEGRATION RULE: Where a frame visually supports a claim, weave the observation INTO the body prose as a natural visual claim — e.g., "the side-by-side benchmark chart shows model A losing 30% throughput vs B" or "the rotary fixture keeps the print head at a constant distance across the curved surface." DO NOT use stage-direction phrasings like "the frames show…", "the early frames also show…", or "the maintenance frames demonstrate…" as paragraph leads or section subjects. Frames serve the claim; they are not the subject.
+
+Avoid generic [[wikilinks]] inside body prose. End with a Related Links line: 5-10 specific concept phrases (Title Case, 1-4 words each) on a single line, separated by " - ":
 
 ---
 
@@ -492,6 +529,146 @@ def extract_transcript_from_report(report: str) -> str:
     return match.group(1).strip() if match else ""
 
 
+# --- Long-video two-pass extraction (Change 2) ---
+
+CHUNK_EXTRACT_PROMPT = """Extract structured information from this section of a YouTube transcript.
+
+Transcript section {section_idx}/{total_sections}:
+{section_text}
+
+Extract and output in this format. Skip any section that doesn't apply.
+
+## Topics Covered:
+- (Main topics or sub-sections discussed in this part.)
+
+## Key Points:
+- (Important information, technical details, decisions, claims, numbers.)
+
+## Examples/Demos:
+- (Concrete examples, demonstrations, walkthroughs, or applications shown.)
+
+## Important Quotes:
+- (Notable direct quotes worth preserving — use the exact transcript wording.)"""
+
+CHUNK_SYSTEM_PROMPT = (
+    "You are a transcript-extraction specialist. Output ONLY the requested "
+    "structured extraction. Never use Bash, Edit, Write, or any tool. No "
+    "preamble, no commentary."
+)
+
+
+def split_transcript(text: str, target: int = CHUNK_TARGET_CHARS) -> list[str]:
+    """Split a transcript into ~`target`-char chunks at newline boundaries."""
+    if len(text) <= target:
+        return [text]
+    chunks: list[str] = []
+    cur: list[str] = []
+    cur_len = 0
+    for line in text.split("\n"):
+        line_len = len(line) + 1
+        if cur_len + line_len > target and cur:
+            chunks.append("\n".join(cur))
+            cur = [line]
+            cur_len = line_len
+        else:
+            cur.append(line)
+            cur_len += line_len
+    if cur:
+        chunks.append("\n".join(cur))
+    return chunks
+
+
+def _call_claude_text(prompt: str, system_prompt: str, model: str, timeout: int) -> str:
+    """Plain-text Claude call (no tools, no JSON envelope) for helper passes."""
+    cmd = [
+        CLAUDE_CLI_PATH,
+        "--print",
+        "--model", model,
+        "--tools", "",
+        "--append-system-prompt", system_prompt,
+        "--no-session-persistence",
+        "--output-format", "text",
+    ]
+    result = subprocess.run(
+        cmd,
+        input=prompt,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"helper claude exit {result.returncode}: {result.stderr.strip()[:300]}"
+        )
+    return result.stdout.strip()
+
+
+def chunk_extract_transcript(transcript_text: str) -> str:
+    """Run yousummary-style structured extraction per chunk; concatenate sections."""
+    chunks = split_transcript(transcript_text)
+    sections: list[str] = []
+    for i, chunk in enumerate(chunks, 1):
+        prompt = CHUNK_EXTRACT_PROMPT.format(
+            section_idx=i, total_sections=len(chunks), section_text=chunk,
+        )
+        try:
+            extracted = _call_claude_text(prompt, CHUNK_SYSTEM_PROMPT, CHUNK_MODEL, CHUNK_TIMEOUT)
+        except (subprocess.TimeoutExpired, RuntimeError) as exc:
+            logger.warning(f"chunk {i}/{len(chunks)} extract failed: {exc}")
+            extracted = f"_[chunk {i} extraction failed; raw transcript follows]_\n\n```\n{chunk[:2000]}\n```"
+        sections.append(f"### Section {i} of {len(chunks)}\n\n{extracted}")
+    return "\n\n".join(sections)
+
+
+def replace_transcript_in_report(report: str, structured_block: str) -> str:
+    """Swap the raw '## Transcript' code block for a structured chunk-extract intermediate."""
+    replacement = (
+        "\n## Transcript (structured chunk-extract for synthesis)\n\n"
+        "_The full raw transcript is appended at the bottom of the final note. "
+        "This is a per-section structured intermediate the worker pre-extracts "
+        "for long videos to preserve detail across sections._\n\n"
+        f"{structured_block}"
+    )
+    return TRANSCRIPT_SECTION_RE.sub(lambda _m: replacement, report, count=1)
+
+
+# --- Fabric extract_wisdom enrichment (Change 3) ---
+
+
+def call_haiku_for_wisdom(transcript_text: str) -> str:
+    """Run cadence-fixed Fabric extract_wisdom on the raw transcript. Returns the
+    SUMMARY/IDEAS/... markdown block, or '' on any failure (best-effort)."""
+    if not WISDOM_ENABLED:
+        return ""
+    if not WISDOM_SYSTEM_PROMPT_PATH.exists():
+        logger.warning(f"wisdom system prompt missing at {WISDOM_SYSTEM_PROMPT_PATH}; skipping")
+        return ""
+    try:
+        system = WISDOM_SYSTEM_PROMPT_PATH.read_text()
+    except OSError as exc:
+        logger.warning(f"wisdom system prompt unreadable: {exc}")
+        return ""
+    try:
+        return _call_claude_text(transcript_text, system, WISDOM_MODEL, WISDOM_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        logger.warning(f"wisdom extraction timed out after {WISDOM_TIMEOUT}s")
+        return ""
+    except RuntimeError as exc:
+        logger.warning(f"wisdom extraction failed: {exc}")
+        return ""
+
+
+def splice_wisdom_block(claude_output: str, wisdom: str) -> str:
+    """Insert wisdom between the model's body and the '## Transcript:' anchor."""
+    if not wisdom:
+        return claude_output
+    anchor = "## Transcript:"
+    if anchor in claude_output:
+        head, _, _ = claude_output.rpartition(anchor)
+        return f"{head.rstrip()}\n\n---\n\n{wisdom}\n\n---\n\n{anchor}"
+    return claude_output.rstrip() + f"\n\n---\n\n{wisdom}\n\n---\n\n{anchor}"
+
+
 def call_cleanup_endpoint(video_id: str) -> bool:
     try:
         resp = http_session.post(
@@ -529,6 +706,26 @@ def process_video(item: dict, work_root: Path) -> dict:
 
         prompt_input = strip_frames_section(report) if item["audio_only"] else report
 
+        # Change 2: long-video chunked extraction. Pre-process the transcript
+        # into structured per-section Topics/Key Points/Examples/Quotes so the
+        # synthesis pass operates on a richer intermediate. The raw transcript
+        # still lands in the final note via append_transcript_block below.
+        if (
+            LONG_VIDEO_CHAR_THRESHOLD > 0
+            and len(transcript_text) > LONG_VIDEO_CHAR_THRESHOLD
+        ):
+            logger.info(
+                f"long video ({len(transcript_text)} chars > {LONG_VIDEO_CHAR_THRESHOLD}); "
+                f"running chunked structured extraction"
+            )
+            try:
+                structured = chunk_extract_transcript(transcript_text)
+            except subprocess.TimeoutExpired:
+                logger.warning("chunked extraction timed out wholesale; falling back to raw")
+                structured = ""
+            if structured:
+                prompt_input = replace_transcript_in_report(prompt_input, structured)
+
         try:
             claude_output = call_claude(PROMPT_TEMPLATE.replace("{watch_report}", prompt_input))
         except subprocess.TimeoutExpired:
@@ -542,6 +739,12 @@ def process_video(item: dict, work_root: Path) -> dict:
                 "kind": "per-url",
                 "message": f"claude output missing frontmatter (head: {claude_output[:200]!r})",
             }
+
+        # Change 3: Fabric extract_wisdom enrichment. Best-effort — failures log
+        # and skip; the note still ships without the wisdom block.
+        wisdom = call_haiku_for_wisdom(transcript_text)
+        if wisdom:
+            claude_output = splice_wisdom_block(claude_output, wisdom)
 
         final_note = append_transcript_block(claude_output, transcript_text)
 
