@@ -658,9 +658,28 @@ def call_haiku_for_wisdom(transcript_text: str) -> str:
         return ""
 
 
+WISDOM_SENTINEL_NO_CONTENT = "<no extractable wisdom>"
+
+
+def is_valid_wisdom(wisdom: str) -> bool:
+    """Must contain at least one expected Fabric section header to splice in.
+    Catches Haiku refusals like 'The content appears to be corrupted...' that
+    don't conform to the SUMMARY/IDEAS/INSIGHTS/QUOTES/HABITS/FACTS/REFERENCES
+    schema."""
+    if not wisdom or wisdom.strip() == WISDOM_SENTINEL_NO_CONTENT:
+        return False
+    has_summary = bool(re.search(r"^##\s+SUMMARY\b", wisdom, re.MULTILINE))
+    has_ideas = bool(re.search(r"^##\s+IDEAS\b", wisdom, re.MULTILINE))
+    return has_summary or has_ideas
+
+
 def splice_wisdom_block(claude_output: str, wisdom: str) -> str:
-    """Insert wisdom between the model's body and the '## Transcript:' anchor."""
-    if not wisdom:
+    """Insert wisdom between the model's body and the '## Transcript:' anchor.
+    Skips silently if the wisdom output is empty, the no-content sentinel, or
+    fails the SUMMARY/IDEAS schema check (e.g., model refusal prose)."""
+    if not is_valid_wisdom(wisdom):
+        if wisdom:
+            logger.info(f"wisdom output failed validation; skipping splice (head: {wisdom[:120]!r})")
         return claude_output
     anchor = "## Transcript:"
     if anchor in claude_output:

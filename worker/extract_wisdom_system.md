@@ -26,6 +26,8 @@ Take a step back and think step-by-step about how to achieve the best possible r
 
 # OUTPUT INSTRUCTIONS
 
+- **If the input transcript has no substantive extractable content** (e.g., it is mostly silence, garbled audio, copyright notices, animation timing markers without dialogue, or pure visual content with no spoken material), output the single literal line `<no extractable wisdom>` and nothing else. Do NOT explain, do NOT ask for clarification, do NOT apologize. The caller will detect that sentinel and skip the wisdom block.
+
 - Only output Markdown. Use `## SECTION_NAME` headers (uppercase, no colon).
 
 - Use bulleted lists, not numbered lists.
