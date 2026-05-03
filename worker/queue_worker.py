@@ -660,27 +660,45 @@ def call_haiku_for_wisdom(transcript_text: str) -> str:
 
 WISDOM_SENTINEL_NO_CONTENT = "<no extractable wisdom>"
 
+# Fabric section names we expect; used both for validation and for H1→H2
+# normalization so the spliced block matches the H2 cadence of the body.
+_WISDOM_SECTIONS = (
+    "SUMMARY", "IDEAS", "INSIGHTS", "QUOTES", "HABITS", "FACTS",
+    "REFERENCES", "ONE-SENTENCE TAKEAWAY", "RECOMMENDATIONS",
+)
+_WISDOM_HEADER_RE = re.compile(
+    r"^(#{1,2})\s+(" + "|".join(re.escape(s) for s in _WISDOM_SECTIONS) + r")\b",
+    re.MULTILINE,
+)
+
 
 def is_valid_wisdom(wisdom: str) -> bool:
     """Must contain at least one expected Fabric section header to splice in.
     Catches Haiku refusals like 'The content appears to be corrupted...' that
     don't conform to the SUMMARY/IDEAS/INSIGHTS/QUOTES/HABITS/FACTS/REFERENCES
-    schema."""
+    schema. Accepts either H1 (`# SUMMARY`) or H2 (`## SUMMARY`); the splicer
+    normalizes to H2 before insertion."""
     if not wisdom or wisdom.strip() == WISDOM_SENTINEL_NO_CONTENT:
         return False
-    has_summary = bool(re.search(r"^##\s+SUMMARY\b", wisdom, re.MULTILINE))
-    has_ideas = bool(re.search(r"^##\s+IDEAS\b", wisdom, re.MULTILINE))
-    return has_summary or has_ideas
+    return bool(_WISDOM_HEADER_RE.search(wisdom))
+
+
+def normalize_wisdom_headers(wisdom: str) -> str:
+    """Promote any H1 Fabric section header (`# SUMMARY`) to H2 (`## SUMMARY`)
+    so the spliced wisdom block visually matches the body's H2 cadence."""
+    return _WISDOM_HEADER_RE.sub(lambda m: f"## {m.group(2)}", wisdom)
 
 
 def splice_wisdom_block(claude_output: str, wisdom: str) -> str:
     """Insert wisdom between the model's body and the '## Transcript:' anchor.
     Skips silently if the wisdom output is empty, the no-content sentinel, or
-    fails the SUMMARY/IDEAS schema check (e.g., model refusal prose)."""
+    fails the schema check (e.g., model refusal prose). Normalizes H1 section
+    headers to H2 before splicing."""
     if not is_valid_wisdom(wisdom):
         if wisdom:
             logger.info(f"wisdom output failed validation; skipping splice (head: {wisdom[:120]!r})")
         return claude_output
+    wisdom = normalize_wisdom_headers(wisdom)
     anchor = "## Transcript:"
     if anchor in claude_output:
         head, _, _ = claude_output.rpartition(anchor)
