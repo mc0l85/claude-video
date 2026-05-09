@@ -1,27 +1,20 @@
 #!/usr/bin/env python3
-"""Format Claude's note output for Obsidian and PUT it to the vault via REST.
+"""Format Claude's note output for Obsidian and write it to the vault filesystem.
 
-The vault REST endpoint (Obsidian Local REST plugin) accepts:
-  PUT  /vault/<path>            create/overwrite a note
-  GET  /vault/<path>            read a note
-  Auth: Authorization: Bearer <OBSIDIAN_API_TOKEN>
-
-Note filename is sanitized from the video title; optionally appends a video ID
-in brackets to avoid collisions when two videos share a title.
+Post-MOR-61 (2026-05-02): vault access is filesystem-based (sshfs mount), not REST.
+Set OBSIDIAN_VAULT_ROOT to the local path of the McKay vault root.
 """
 from __future__ import annotations
 
 import logging
 import os
 import re
-
-import requests
+from pathlib import Path
 
 logger = logging.getLogger("newtube.obsidian")
 
 OBSIDIAN_API_ENABLED = os.environ.get("OBSIDIAN_API_ENABLED", "true").lower() == "true"
-OBSIDIAN_API_URL = os.environ.get("OBSIDIAN_API_URL", "").rstrip("/")
-OBSIDIAN_API_TOKEN = os.environ.get("OBSIDIAN_API_TOKEN", "")
+OBSIDIAN_VAULT_ROOT = os.environ.get("OBSIDIAN_VAULT_ROOT", "").rstrip("/")
 OBSIDIAN_FOLDER = os.environ.get("OBSIDIAN_FOLDER", "")
 
 
@@ -34,91 +27,58 @@ def sanitize_filename(text: str, max_length: int = 245) -> str:
     return cleaned or "untitled"
 
 
-def _vault_url(file_path: str) -> str:
-    return f"{OBSIDIAN_API_URL}/vault/{file_path}"
-
-
-def _headers(content_type: str | None = None) -> dict[str, str]:
-    h = {"Authorization": f"Bearer {OBSIDIAN_API_TOKEN}"}
-    if content_type:
-        h["Content-Type"] = content_type
-    return h
-
-
 def put_note(
     title: str,
     content: str,
     video_id: str | None = None,
     folder: str | None = None,
 ) -> tuple[bool, str]:
-    """PUT a markdown note. Returns (success, vault_path_used)."""
+    """Write a markdown note to the vault filesystem. Returns (success, vault_path_used)."""
     if not OBSIDIAN_API_ENABLED:
-        logger.info("OBSIDIAN_API_ENABLED=false — skipping upload")
+        logger.info("OBSIDIAN_API_ENABLED=false — skipping vault write")
         return False, ""
 
-    if not OBSIDIAN_API_URL or not OBSIDIAN_API_TOKEN:
-        logger.error("OBSIDIAN_API_URL or OBSIDIAN_API_TOKEN missing")
+    if not OBSIDIAN_VAULT_ROOT:
+        logger.error("OBSIDIAN_VAULT_ROOT not set")
         return False, ""
 
     base = sanitize_filename(title)
     fname = f"{base} [{video_id}].md" if video_id else f"{base}.md"
     parent = folder if folder is not None else OBSIDIAN_FOLDER
-    file_path = f"{parent}/{fname}" if parent else fname
-    endpoint = _vault_url(file_path)
+    rel_path = f"{parent}/{fname}" if parent else fname
+    full_path = Path(OBSIDIAN_VAULT_ROOT) / rel_path
 
-    logger.info(f"uploading to Obsidian: {file_path}")
+    logger.info(f"writing to vault: {rel_path}")
     try:
-        resp = requests.put(
-            endpoint,
-            headers=_headers("text/markdown"),
-            data=content.encode("utf-8"),
-            timeout=30,
-        )
-    except requests.RequestException as exc:
-        logger.error(f"Obsidian PUT raised: {exc}")
-        raise
-
-    if resp.status_code in (200, 201, 204):
-        logger.info(f"uploaded: {file_path}")
-        return True, file_path
-
-    logger.error(f"Obsidian PUT returned {resp.status_code}: {resp.text[:200]}")
-    return False, file_path
+        full_path.parent.mkdir(parents=True, exist_ok=True)
+        full_path.write_text(content, encoding="utf-8")
+        return True, rel_path
+    except OSError as exc:
+        logger.error(f"vault write failed: {exc}")
+        return False, rel_path
 
 
 def append_to_log(line: str, log_filename: str = "_Newtube_log.md") -> bool:
     """Append a single line to a vault log file. Creates it with a header on first write."""
-    if not OBSIDIAN_API_ENABLED:
+    if not OBSIDIAN_API_ENABLED or not OBSIDIAN_VAULT_ROOT:
         return False
 
-    log_path = f"{OBSIDIAN_FOLDER}/{log_filename}" if OBSIDIAN_FOLDER else log_filename
-    endpoint = _vault_url(log_path)
+    log_rel = f"{OBSIDIAN_FOLDER}/{log_filename}" if OBSIDIAN_FOLDER else log_filename
+    log_path = Path(OBSIDIAN_VAULT_ROOT) / log_rel
 
     try:
-        get = requests.get(endpoint, headers=_headers(), timeout=15)
-        if get.status_code == 200:
-            existing = get.text
-        elif get.status_code == 404:
+        if log_path.exists():
+            existing = log_path.read_text(encoding="utf-8")
+        else:
             existing = (
                 "# Newtube processing log\n\n"
                 "| Date | Status | Title | Channel | Duration | Mode | Source |\n"
                 "|------|--------|-------|---------|----------|------|--------|\n"
             )
-        else:
-            logger.warning(f"log GET returned {get.status_code}; skipping append")
-            return False
+            log_path.parent.mkdir(parents=True, exist_ok=True)
 
-        new = existing.rstrip() + "\n" + line + "\n"
-        put = requests.put(
-            endpoint,
-            headers=_headers("text/markdown"),
-            data=new.encode("utf-8"),
-            timeout=15,
-        )
-        if put.status_code in (200, 201, 204):
-            return True
-        logger.warning(f"log PUT returned {put.status_code}")
-        return False
-    except requests.RequestException as exc:
-        logger.warning(f"log append raised: {exc}")
+        log_path.write_text(existing.rstrip() + "\n" + line + "\n", encoding="utf-8")
+        return True
+    except OSError as exc:
+        logger.warning(f"log append failed: {exc}")
         return False

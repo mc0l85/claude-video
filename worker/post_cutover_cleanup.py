@@ -27,7 +27,6 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import requests
 from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -43,8 +42,7 @@ ARCHIVED_PY = YOUSUMMARY_DIR / "yousummary.py.archive-2026-04-29"
 BAK_GLOB = "yousummary.py.bak-20260424*"
 DEPRECATED_CRON_MARKER = "DEPRECATED 2026-04-29 (newtube took over"
 
-OBSIDIAN_API_URL = os.environ.get("OBSIDIAN_API_URL", "").rstrip("/")
-OBSIDIAN_API_TOKEN = os.environ.get("OBSIDIAN_API_TOKEN", "")
+OBSIDIAN_VAULT_ROOT = os.environ.get("OBSIDIAN_VAULT_ROOT", "").rstrip("/")
 OBSIDIAN_FOLDER = os.environ.get("OBSIDIAN_FOLDER", "Basket/Transcripts")
 
 NOTIFY_ENABLED = os.environ.get("NOTIFY_ENABLED", "true").lower() == "true"
@@ -103,32 +101,15 @@ def breaker_active() -> bool:
 
 
 def vault_notes_in_folder() -> int:
-    """List Basket/Transcripts/ in the vault and count entries. -1 if vault unreachable."""
-    if not OBSIDIAN_API_URL or not OBSIDIAN_API_TOKEN:
-        log.warning("Obsidian env missing — skipping vault check")
+    """Count .md notes in vault folder. -1 if vault unavailable."""
+    if not OBSIDIAN_VAULT_ROOT or not OBSIDIAN_FOLDER:
+        log.warning("OBSIDIAN_VAULT_ROOT or OBSIDIAN_FOLDER missing — skipping vault check")
         return -1
-
-    try:
-        resp = requests.get(
-            f"{OBSIDIAN_API_URL}/vault/{OBSIDIAN_FOLDER}/",
-            headers={"Authorization": f"Bearer {OBSIDIAN_API_TOKEN}"},
-            timeout=15,
-        )
-    except requests.RequestException as exc:
-        log.warning(f"vault GET failed: {exc}")
+    folder_path = Path(OBSIDIAN_VAULT_ROOT) / OBSIDIAN_FOLDER
+    if not folder_path.is_dir():
+        log.warning(f"vault folder not found: {folder_path}")
         return -1
-
-    if resp.status_code != 200:
-        log.warning(f"vault GET returned {resp.status_code}")
-        return -1
-
-    try:
-        data = resp.json()
-        files = data.get("files", []) if isinstance(data, dict) else data
-    except Exception:
-        files = []
-
-    return len(files) if files else 0
+    return sum(1 for _ in folder_path.glob("*.md"))
 
 
 def health_is_green(counts: dict, breaker: bool, vault_count: int) -> tuple[bool, list[str]]:
